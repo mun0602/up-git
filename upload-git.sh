@@ -1,437 +1,316 @@
 #!/bin/bash
 
-# Script tự động upload code lên GitHub - Phiên bản cải tiến
-# Xử lý tốt hơn các vấn đề về mạng
+# Script tự động upload code lên GitHub - Phiên bản tối ưu
+# Author: mun0602
+# Date: 2025-07-01
 
-# Màu sắc cho output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-print_message() {
-    local color=$1
-    local message=$2
-    echo -e "${color}${message}${NC}"
-}
-
-# Hàm kiểm tra kết nối internet cải tiến
-check_internet_connection() {
-    print_message $BLUE "Kiểm tra kết nối internet..."
-    
-    local test_hosts=("8.8.8.8" "1.1.1.1" "google.com" "github.com")
-    local connected=false
-    
-    for host in "${test_hosts[@]}"; do
-        print_message $YELLOW "Thử kết nối đến $host..."
-        
-        # Thử ping với timeout ngắn
-        if timeout 5 ping -c 1 "$host" &> /dev/null; then
-            print_message $GREEN "Kết nối thành công đến $host"
-            connected=true
-            break
-        elif timeout 10 curl -s --head "https://$host" &> /dev/null; then
-            print_message $GREEN "Kết nối HTTP thành công đến $host"
-            connected=true
-            break
-        else
-            print_message $YELLOW "Không thể kết nối đến $host"
-        fi
-    done
-    
-    if [[ "$connected" == true ]]; then
-        print_message $GREEN "Kết nối internet OK."
-        return 0
-    else
-        print_message $RED "Không có kết nối internet."
-        print_message $YELLOW "Gợi ý khắc phục:"
-        print_message $YELLOW "1. Kiểm tra cáp mạng/WiFi"
-        print_message $YELLOW "2. Kiểm tra cài đặt proxy/VPN"
-        print_message $YELLOW "3. Thử kết nối mạng khác"
-        print_message $YELLOW "4. Khởi động lại router"
-        
-        read -p "Bạn có muốn tiếp tục mà không kiểm tra internet? (y/n): " skip_internet
-        if [[ "$skip_internet" == "y" || "$skip_internet" == "Y" ]]; then
-            print_message $YELLOW "Bỏ qua kiểm tra internet..."
-            return 0
-        else
-            return 1
-        fi
-    fi
-}
-
-# Hàm kiểm tra dependencies
-check_dependencies() {
-    print_message $BLUE "Kiểm tra các công cụ cần thiết..."
-    
-    # Kiểm tra Git
-    if ! command -v git &> /dev/null; then
-        print_message $RED "Git chưa được cài đặt."
-        print_message $YELLOW "Cài đặt Git:"
-        print_message $YELLOW "Ubuntu/Debian: sudo apt update && sudo apt install git"
-        print_message $YELLOW "CentOS/RHEL: sudo yum install git"
-        print_message $YELLOW "macOS: brew install git"
-        exit 1
-    else
-        print_message $GREEN "Git đã được cài đặt: $(git --version)"
-    fi
-    
-    # Kiểm tra curl
-    if ! command -v curl &> /dev/null; then
-        print_message $YELLOW "curl chưa được cài đặt, sẽ sử dụng wget thay thế."
-        if ! command -v wget &> /dev/null; then
-            print_message $RED "Cần cài đặt curl hoặc wget để kiểm tra kết nối."
-        fi
-    fi
-    
-    # Kiểm tra GitHub CLI
-    if command -v gh &> /dev/null; then
-        print_message $GREEN "GitHub CLI đã được cài đặt: $(gh --version | head -1)"
-        GH_CLI_AVAILABLE=true
-    else
-        print_message $YELLOW "GitHub CLI chưa được cài đặt."
-        print_message $YELLOW "Để cài đặt: https://cli.github.com/"
-        GH_CLI_AVAILABLE=false
-    fi
-}
-
-# Hàm cấu hình Git user
-setup_git_config() {
-    print_message $BLUE "Kiểm tra cấu hình Git..."
-    
-    local git_name=$(git config --get user.name 2>/dev/null)
-    local git_email=$(git config --get user.email 2>/dev/null)
-    
-    if [[ -z "$git_name" ]]; then
-        print_message $YELLOW "Chưa có cấu hình user.name"
-        while true; do
-            read -p "Nhập tên của bạn: " new_git_name
-            if [[ -n "$new_git_name" ]]; then
-                git config --global user.name "$new_git_name"
-                print_message $GREEN "Đã cấu hình user.name: $new_git_name"
-                break
-            else
-                print_message $RED "Tên không được để trống!"
-            fi
-        done
-    else
-        print_message $GREEN "User.name: $git_name"
-    fi
-    
-    if [[ -z "$git_email" ]]; then
-        print_message $YELLOW "Chưa có cấu hình user.email"
-        while true; do
-            read -p "Nhập email GitHub của bạn: " new_git_email
-            if [[ "$new_git_email" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
-                git config --global user.email "$new_git_email"
-                print_message $GREEN "Đã cấu hình user.email: $new_git_email"
-                break
-            else
-                print_message $RED "Email không hợp lệ! Vui lòng nhập lại."
-            fi
-        done
-    else
-        print_message $GREEN "User.email: $git_email"
-    fi
-}
-
-# Hàm cấu hình GitHub authentication
+# Hàm kiểm tra và thiết lập GitHub authentication
 setup_github_auth() {
-    print_message $BLUE "Cấu hình xác thực GitHub..."
+    echo "Kiểm tra cấu hình GitHub..."
     
-    if [[ "$GH_CLI_AVAILABLE" == true ]]; then
-        if ! gh auth status &> /dev/null; then
-            print_message $YELLOW "Chưa đăng nhập GitHub CLI."
-            print_message $BLUE "Đang khởi động quá trình đăng nhập..."
-            
-            # Thử đăng nhập với browser
-            if gh auth login --web; then
-                print_message $GREEN "Đăng nhập GitHub CLI thành công!"
-            else
-                print_message $YELLOW "Đăng nhập web thất bại, thử phương thức token..."
-                gh auth login --with-token
-            fi
-        else
-            print_message $GREEN "Đã đăng nhập GitHub CLI."
-        fi
-    else
-        # Cấu hình credential helper
-        git config --global credential.helper store
+    # Kiểm tra xem đã có token GitHub chưa
+    if ! git config --get github.token &> /dev/null; then
+        echo "Chưa tìm thấy token GitHub. Vui lòng thiết lập:"
+        echo "1. Truy cập https://github.com/settings/tokens"
+        echo "2. Tạo token mới với quyền 'repo'"
+        read -p "Nhập token GitHub của bạn: " github_token
         
-        print_message $YELLOW "Để đẩy code lên GitHub, bạn cần Personal Access Token:"
-        print_message $YELLOW "1. Truy cập: https://github.com/settings/tokens"
-        print_message $YELLOW "2. Click 'Generate new token (classic)'"
-        print_message $YELLOW "3. Chọn scope: 'repo' và 'workflow'"
-        print_message $YELLOW "4. Copy token và dùng thay mật khẩu khi push"
-        print_message $YELLOW ""
-        print_message $BLUE "Token sẽ được lưu tự động sau lần đầu sử dụng."
+        # Lưu token vào git config
+        git config --global github.token "$github_token"
+        echo "Đã lưu token GitHub."
+    fi
+    
+    # Kiểm tra cấu hình Git cơ bản
+    if ! git config --get user.name &> /dev/null || ! git config --get user.email &> /dev/null; then
+        echo "Vui lòng nhập thông tin Git của bạn:"
+        read -p "Nhập tên của bạn: " git_name
+        read -p "Nhập email GitHub của bạn: " git_email
+        
+        git config --global user.name "$git_name"
+        git config --global user.email "$git_email"
+        echo "Đã cập nhật thông tin Git."
     fi
 }
 
-# Hàm tạo repository trên GitHub
-create_github_repo() {
-    local repo_name=$1
-    
-    if [[ "$GH_CLI_AVAILABLE" == true ]]; then
-        print_message $BLUE "Tạo repository GitHub với GitHub CLI..."
-        
-        read -p "Bạn có muốn tạo repository mới '$repo_name' trên GitHub không? (y/n): " create_repo
-        
-        if [[ "$create_repo" == "y" || "$create_repo" == "Y" ]]; then
-            read -p "Repository có public không? (y/n): " is_public
-            
-            local visibility_flag="--private"
-            if [[ "$is_public" == "y" || "$is_public" == "Y" ]]; then
-                visibility_flag="--public"
-            fi
-            
-            if gh repo create "$repo_name" $visibility_flag --source=. --remote=origin; then
-                print_message $GREEN "Repository '$repo_name' đã được tạo!"
-                
-                # Push code
-                if git push -u origin main 2>/dev/null || git push -u origin master; then
-                    print_message $GREEN "Code đã được đẩy lên repository!"
-                    return 0
-                else
-                    print_message $YELLOW "Repository đã tạo nhưng push thất bại. Thử push thủ công."
-                fi
-            else
-                print_message $RED "Không thể tạo repository. Có thể tên đã tồn tại."
-            fi
-        fi
-    fi
-    return 1
-}
-
-# Hàm xử lý Git repository
-handle_git_repository() {
-    local project_dir=$1
-    
-    cd "$project_dir" || exit 1
-    
-    # Khởi tạo Git nếu chưa có
-    if [[ ! -d ".git" ]]; then
-        print_message $BLUE "Khởi tạo Git repository..."
-        git init
-        
-        # Tạo .gitignore
-        if [[ ! -f ".gitignore" ]]; then
-            print_message $BLUE "Tạo .gitignore..."
-            cat > .gitignore << 'EOF'
-# OS files
-.DS_Store
-.DS_Store?
-._*
-Thumbs.db
-ehthumbs.db
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Logs
-*.log
-npm-debug.log*
-
-# Dependencies
-node_modules/
-__pycache__/
-*.pyc
-venv/
-env/
-
-# Build outputs
-dist/
-build/
-*.o
-*.exe
-EOF
-        fi
-    fi
-    
-    # Kiểm tra branch chính
-    local default_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' 2>/dev/null)
-    if [[ -z "$default_branch" ]]; then
-        default_branch=$(git branch --show-current 2>/dev/null)
-        if [[ -z "$default_branch" ]]; then
-            default_branch="main"
-            git checkout -b main 2>/dev/null || git branch -M main
-        fi
-    fi
-    
-    # Add files
-    print_message $BLUE "Thêm files vào Git..."
-    git add .
-    
-    # Kiểm tra staged changes
-    if git diff --staged --quiet; then
-        print_message $YELLOW "Không có thay đổi nào để commit."
-        
-        # Kiểm tra untracked files
-        if [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
-            print_message $YELLOW "Có files chưa được track. Thử add lại..."
-            git add -A
-        fi
-        
-        if git diff --staged --quiet; then
-            return 1
-        fi
-    fi
-    
-    # Commit
-    read -p "Nhập commit message (Enter để dùng mặc định): " commit_msg
-    if [[ -z "$commit_msg" ]]; then
-        commit_msg="Auto commit - $(date '+%Y-%m-%d %H:%M:%S')"
-    fi
-    
-    git commit -m "$commit_msg"
-    print_message $GREEN "Commit thành công: $commit_msg"
-    return 0
-}
-
-# Hàm đẩy code lên GitHub
-push_to_github() {
-    local repo_url=$1
-    
-    # Thêm remote nếu chưa có
-    if ! git remote get-url origin &> /dev/null; then
-        print_message $BLUE "Thêm remote origin..."
-        git remote add origin "$repo_url"
-    fi
-    
-    # Lấy branch hiện tại
-    local current_branch=$(git branch --show-current)
-    
-    print_message $BLUE "Đẩy code lên GitHub (branch: $current_branch)..."
-    
-    # Thử push với các phương án khác nhau
-    local success=false
-    
-    # Phương án 1: Push thông thường
-    if git push -u origin "$current_branch"; then
-        success=true
-    # Phương án 2: Force push (cẩn thận)
-    elif [[ "$current_branch" == "main" ]] || [[ "$current_branch" == "master" ]]; then
-        print_message $YELLOW "Push thông thường thất bại. Thử force push..."
-        read -p "Bạn có chắc muốn force push không? (y/n): " force_confirm
-        if [[ "$force_confirm" == "y" ]]; then
-            if git push -u origin "$current_branch" --force; then
-                success=true
-            fi
-        fi
-    fi
-    
-    if [[ "$success" == true ]]; then
-        print_message $GREEN "Đẩy code thành công!"
+# Hàm kiểm tra kết nối internet
+check_internet_connection() {
+    echo "Kiểm tra kết nối internet..."
+    if ping -c 1 github.com &> /dev/null; then
+        echo "Kết nối internet OK."
         return 0
     else
-        print_message $RED "Không thể đẩy code."
-        print_message $YELLOW "Khắc phục:"
-        print_message $YELLOW "1. Kiểm tra quyền truy cập repository"
-        print_message $YELLOW "2. Đảm bảo repository tồn tại"
-        print_message $YELLOW "3. Kiểm tra token/credentials"
+        echo "Không có kết nối internet. Vui lòng kiểm tra mạng của bạn."
         return 1
     fi
 }
 
-# Offline mode - không cần internet
-offline_mode() {
-    print_message $YELLOW "=== CHẾđộ OFFLINE ==="
-    print_message $BLUE "Thiết lập Git repository cục bộ..."
-    
-    read -p "Nhập tên project: " project_name
-    if [[ -z "$project_name" ]]; then
-        project_name="my-project"
-    fi
-    
-    mkdir -p "$project_name"
-    cd "$project_name"
-    
-    # Tạo README nếu chưa có
-    if [[ ! -f "README.md" ]]; then
-        echo "# $project_name" > README.md
-        echo "" >> README.md
-        echo "Project được tạo tự động." >> README.md
-    fi
-    
-    if handle_git_repository "."; then
-        print_message $GREEN "Git repository đã được thiết lập!"
-        print_message $YELLOW "Để đẩy lên GitHub khi có mạng:"
-        print_message $YELLOW "1. git remote add origin <repo-url>"
-        print_message $YELLOW "2. git push -u origin main"
+# Hàm kiểm tra cấu hình Git
+check_git_config() {
+    echo "Kiểm tra cấu hình Git..."
+    if git config --get user.name &> /dev/null && git config --get user.email &> /dev/null; then
+        echo "Cấu hình Git OK."
+        echo "  Tên: $(git config --get user.name)"
+        echo "  Email: $(git config --get user.email)"
+        return 0
+    else
+        echo "Cấu hình Git chưa đầy đủ. Vui lòng cấu hình:"
+        read -p "Nhập tên của bạn: " git_name
+        read -p "Nhập email của bạn: " git_email
+        git config --global user.name "$git_name"
+        git config --global user.email "$git_email"
+        echo "Đã cập nhật cấu hình Git."
+        return 0
     fi
 }
 
-# Hàm main
-main() {
-    print_message $GREEN "=== SCRIPT TỰ ĐỘNG UPLOAD CODE LÊN GITHUB ==="
-    print_message $GREEN "Phiên bản cải tiến - Xử lý offline"
+# Hàm kiểm tra kết nối GitHub với số lần thử lại
+check_github_connection() {
+    local repo_url="$1"
+    local max_attempts=3
+    local attempt=1
     
-    # Kiểm tra dependencies
-    check_dependencies
+    echo "Kiểm tra kết nối GitHub..."
     
-    # Cấu hình Git (không cần internet)
-    setup_git_config
-    
-    # Kiểm tra internet
-    if ! check_internet_connection; then
-        print_message $YELLOW "Chạy ở chế độ offline?"
-        read -p "(y/n): " run_offline
-        if [[ "$run_offline" == "y" || "$run_offline" == "Y" ]]; then
-            offline_mode
-            exit 0
+    while [ $attempt -le $max_attempts ]; do
+        if git ls-remote "$repo_url" &> /dev/null; then
+            echo "Kết nối GitHub thành công."
+            return 0
         else
+            echo "Lần thử $attempt/$max_attempts: Không thể kết nối đến repository GitHub."
+            if [ $attempt -lt $max_attempts ]; then
+                echo "Đang thử lại sau 5 giây..."
+                sleep 5
+            fi
+            attempt=$((attempt + 1))
+        fi
+    done
+    
+    echo "Không thể kết nối đến repository GitHub sau $max_attempts lần thử."
+    echo "Vui lòng kiểm tra:"
+    echo "1. URL repository có chính xác không"
+    echo "2. Bạn có quyền truy cập repository không"
+    echo "3. Repository có tồn tại không"
+    return 1
+}
+
+# Hàm tạo commit message với thông tin chi tiết
+create_commit_message() {
+    local script_file="$1"
+    local user_name=$(git config --get user.name)
+    local user_email=$(git config --get user.email)
+    local current_date=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    echo "Thêm script $script_file
+
+Author: $user_name <$user_email>
+Date: $current_date
+Description: Script được tạo tự động bằng auto-upload tool"
+}
+
+# Gọi hàm setup GitHub auth ngay khi bắt đầu script
+echo "=== AUTO UPLOAD GITHUB SCRIPT ==="
+echo "Phiên bản tối ưu - Created by mun0602"
+echo "Ngày: $(date '+%Y-%m-%d %H:%M:%S')"
+echo "=================================="
+
+setup_github_auth
+
+# Nhập tên file .sh cần tạo
+while true; do
+    echo "Nhập tên file .sh cần tạo (không cần nhập đuôi .sh):"
+    read file_name
+    
+    # Kiểm tra input không rỗng
+    if [[ -z "$file_name" ]]; then
+        echo "Tên file không được để trống!"
+        continue
+    fi
+    
+    folder_name="${file_name}-folder"
+    script_file="${file_name}.sh"
+    
+    # Kiểm tra nếu file hoặc thư mục đã tồn tại
+    if [ -d "$folder_name" ] || [ -f "$folder_name/$script_file" ]; then
+        echo "Thư mục '$folder_name' hoặc file '$script_file' đã tồn tại."
+        read -p "Bạn có muốn ghi đè không? (y/n): " overwrite
+        if [[ "$overwrite" == "y" || "$overwrite" == "Y" ]]; then
+            rm -rf "$folder_name"
+            break
+        else
+            echo "Vui lòng chọn tên khác."
+        fi
+    else
+        break
+    fi
+done
+
+# Tạo thư mục và file
+echo "Tạo thư mục '$folder_name' và file '$script_file'..."
+mkdir -p "$folder_name"
+cd "$folder_name"
+touch "$script_file"
+
+# Tạo template cơ bản cho script
+cat > "$script_file" << 'EOF'
+#!/bin/bash
+
+# Script template được tạo tự động
+# Author: $(git config --get user.name)
+# Email: $(git config --get user.email)
+# Date: $(date '+%Y-%m-%d %H:%M:%S')
+
+echo "Hello World!"
+echo "Script được tạo bởi: $(git config --get user.name)"
+
+# Thêm code của bạn vào đây
+
+EOF
+
+# Mở file trong nano để sửa
+echo "Đã tạo template cho file $script_file."
+read -p "Bạn có muốn chỉnh sửa file ngay bây giờ không? (y/n): " edit_now
+
+if [[ "$edit_now" == "y" || "$edit_now" == "Y" ]]; then
+    echo "Mở nano để chỉnh sửa..."
+    nano "$script_file"
+fi
+
+# Kiểm tra nếu user đã lưu file
+if [ -s "$script_file" ]; then
+    echo "File $script_file đã sẵn sàng."
+else
+    echo "File $script_file rỗng, sẽ sử dụng template mặc định."
+fi
+
+# Đặt quyền thực thi cho file
+chmod +x "$script_file"
+echo "Đã cấp quyền thực thi cho $script_file."
+
+# Khởi tạo Git
+echo "Khởi tạo Git repository..."
+git init
+
+# Tạo .gitignore
+cat > .gitignore << 'EOF'
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+EOF
+
+# Thêm file vào Git
+echo "Thêm files vào Git..."
+git add .
+
+# Tạo commit với thông tin chi tiết
+commit_message=$(create_commit_message "$script_file")
+git commit -m "$commit_message"
+
+echo "Commit thành công với thông tin:"
+echo "  Author: $(git config --get user.name) <$(git config --get user.email)>"
+echo "  Message: Thêm script $script_file"
+
+# Thêm remote repository
+while true; do
+    read -p "Nhập URL repository GitHub của bạn: " repo_url
+    
+    # Kiểm tra URL không rỗng
+    if [[ -z "$repo_url" ]]; then
+        echo "URL không được để trống!"
+        continue
+    fi
+    
+    # Kiểm tra kết nối internet trước
+    if ! check_internet_connection; then
+        read -p "Bạn có muốn thử lại không? (y/n): " retry
+        [ "$retry" != "y" ] && exit 1
+        continue
+    fi
+    
+    # Kiểm tra cấu hình Git
+    if ! check_git_config; then
+        read -p "Bạn có muốn thử lại không? (y/n): " retry
+        [ "$retry" != "y" ] && exit 1
+        continue
+    fi
+    
+    # Kiểm tra kết nối GitHub
+    if check_github_connection "$repo_url"; then
+        # Kiểm tra xem remote đã tồn tại chưa
+        if git remote get-url origin &> /dev/null; then
+            echo "Remote origin đã tồn tại, cập nhật URL..."
+            git remote set-url origin "$repo_url"
+        else
+            if git remote add origin "$repo_url"; then
+                echo "Đã thêm remote repository thành công."
+            else
+                echo "Không thể thêm remote repository. Vui lòng thử lại."
+                continue
+            fi
+        fi
+        break
+    else
+        read -p "Bạn có muốn thử lại không? (y/n): " retry
+        [ "$retry" != "y" ] && exit 1
+    fi
+done
+
+# Push lên repository
+echo "Đang push code lên GitHub..."
+git branch -M main
+
+# Thử push với retry mechanism
+max_push_attempts=3
+push_attempt=1
+
+while [ $push_attempt -le $max_push_attempts ]; do
+    echo "Lần thử push $push_attempt/$max_push_attempts..."
+    
+    if git push -u origin main; then
+        echo "Push thành công!"
+        break
+    else
+        echo "Push thất bại lần $push_attempt."
+        
+        if [ $push_attempt -lt $max_push_attempts ]; then
+            echo "Đang thử lại sau 3 giây..."
+            sleep 3
+            
+            # Thử pull trước khi push lại
+            echo "Thử đồng bộ với remote..."
+            git pull origin main --rebase 2>/dev/null || true
+        else
+            echo "Không thể push sau $max_push_attempts lần thử."
+            echo "Vui lòng kiểm tra:"
+            echo "1. Token GitHub có đúng không"
+            echo "2. Quyền truy cập repository"
+            echo "3. Thử push thủ công: git push -u origin main"
             exit 1
         fi
     fi
     
-    # Cấu hình GitHub auth
-    setup_github_auth
-    
-    # Xử lý project
-    read -p "Nhập tên project (hoặc '.' cho thư mục hiện tại): " project_name
-    
-    if [[ "$project_name" == "." ]]; then
-        project_dir=$(pwd)
-        project_name=$(basename "$project_dir")
-    else
-        project_dir="$project_name"
-        if [[ ! -d "$project_dir" ]]; then
-            mkdir -p "$project_dir"
-            echo "# $project_name" > "$project_dir/README.md"
-        fi
-    fi
-    
-    # Xử lý Git
-    if ! handle_git_repository "$project_dir"; then
-        print_message $YELLOW "Không có gì để upload."
-        exit 0
-    fi
-    
-    # Thử tạo repo tự động trước
-    if ! create_github_repo "$project_name"; then
-        # Nhập URL thủ công
-        while true; do
-            read -p "Nhập URL repository GitHub: " repo_url
-            if [[ -n "$repo_url" ]]; then
-                if push_to_github "$repo_url"; then
-                    break
-                fi
-            fi
-            
-            read -p "Thử lại? (y/n): " retry
-            if [[ "$retry" != "y" ]]; then
-                exit 1
-            fi
-        done
-    fi
-    
-    print_message $GREEN "=== HOÀN TẤT ==="
-    print_message $GREEN "Code đã được xử lý thành công!"
-}
+    push_attempt=$((push_attempt + 1))
+done
 
-# Chạy script
-main "$@"
+# Thông báo hoàn tất
+echo "=================================="
+echo "🎉 HOÀN TẤT!"
+echo "Script $script_file đã được đẩy lên GitHub repository thành công!"
+echo "Repository: $repo_url"
+echo "Author: $(git config --get user.name) <$(git config --get user.email)>"
+echo "Commit: $(git log --oneline -1)"
+echo "Thời gian: $(date '+%Y-%m-%d %H:%M:%S')"
+echo "=================================="
+
+# Hiển thị thông tin hữu ích
+echo "Các lệnh hữu ích:"
+echo "  - Xem status: git status"
+echo "  - Xem log: git log --oneline"
+echo "  - Push thay đổi mới: git add . && git commit -m 'message' && git push"
