@@ -9,9 +9,20 @@
 set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
 # ======================== CONSTANTS & VARIABLES ========================
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Handle script executed via curl | bash
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    readonly SCRIPT_DIR="$(pwd)"
+fi
+
 readonly CONFIG_FILE="$HOME/.github_script_config"
-readonly LOG_FILE="/tmp/github_script_$(date +%Y%m%d_%H%M%S).log"
+# Use Windows-compatible temp path
+if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
+    readonly LOG_FILE="$HOME/github_script_$(date +%Y%m%d_%H%M%S).log"
+else
+    readonly LOG_FILE="/tmp/github_script_$(date +%Y%m%d_%H%M%S).log"
+fi
 
 # Colors for output
 readonly RED='\033[0;31m'
@@ -63,7 +74,12 @@ show_progress() {
 cleanup() {
     log "INFO" "Đang dọn dẹp tài nguyên..."
     # Remove temp files if needed
-    [ -f "/tmp/temp_script_$$" ] && rm -f "/tmp/temp_script_$$"
+    local temp_pattern="temp_script_$"
+    if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
+        [ -f "$HOME/$temp_pattern" ] && rm -f "$HOME/$temp_pattern"
+    else
+        [ -f "/tmp/$temp_pattern" ] && rm -f "/tmp/$temp_pattern" 
+    fi
 }
 
 # Set up cleanup trap
@@ -150,13 +166,22 @@ check_github_cli() {
 # Check SSH connection to GitHub
 check_ssh_github() {
     log "INFO" "Kiểm tra kết nối SSH với GitHub..."
-    if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
-        log "INFO" "SSH connection với GitHub thành công"
-        return 0
+    
+    # For Windows Git Bash, may need different approach
+    if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
+        if ssh -o ConnectTimeout=10 -o BatchMode=yes -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
+            log "INFO" "SSH connection với GitHub thành công"
+            return 0
+        fi
     else
-        log "WARN" "SSH connection với GitHub thất bại"
-        return 1
+        if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
+            log "INFO" "SSH connection với GitHub thành công"
+            return 0
+        fi
     fi
+    
+    log "WARN" "SSH connection với GitHub thất bại"
+    return 1
 }
 
 # Setup authentication method
@@ -529,6 +554,7 @@ main() {
 }
 
 # Execute main function if script is run directly
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+# Handle both normal execution and curl | bash execution
+if [[ -z "${BASH_SOURCE[0]:-}" ]] || [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi
