@@ -141,6 +141,180 @@ EOF
     log "INFO" "Đã lưu cấu hình vào $CONFIG_FILE"
 }
 
+# ======================== SSH KEY MANAGEMENT ========================
+
+# Check if SSH key exists
+check_ssh_key_exists() {
+    local ssh_dir="$HOME/.ssh"
+    local key_files=("id_ed25519" "id_rsa" "id_ecdsa")
+    
+    for key_file in "${key_files[@]}"; do
+        if [ -f "$ssh_dir/$key_file" ]; then
+            log "INFO" "Tìm thấy SSH key: $key_file"
+            return 0
+        fi
+    done
+    
+    log "WARN" "Không tìm thấy SSH key nào"
+    return 1
+}
+
+# Generate new SSH key
+generate_ssh_key() {
+    local email
+    local ssh_dir="$HOME/.ssh"
+    
+    log "INFO" "🔑 Tạo SSH key mới cho GitHub..."
+    
+    # Get email from git config or ask user
+    email=$(git config --global user.email 2>/dev/null || echo "")
+    
+    if [ -z "$email" ]; then
+        read -p "Nhập email GitHub của bạn: " email
+        if [ -n "$email" ]; then
+            git config --global user.email "$email"
+        fi
+    fi
+    
+    # Create .ssh directory if not exists
+    mkdir -p "$ssh_dir"
+    chmod 700 "$ssh_dir"
+    
+    # Generate Ed25519 key (recommended)
+    log "INFO" "Đang tạo SSH key Ed25519..."
+    if ssh-keygen -t ed25519 -C "$email" -f "$ssh_dir/id_ed25519" -N ""; then
+        log "INFO" "✅ Đã tạo SSH key thành công!"
+        return 0
+    else
+        log "ERROR" "❌ Không thể tạo SSH key"
+        return 1
+    fi
+}
+
+# Start SSH agent and add key
+setup_ssh_agent() {
+    log "INFO" "Thiết lập SSH agent..."
+    
+    # Start ssh-agent if not running
+    if ! pgrep -x "ssh-agent" > /dev/null; then
+        eval "$(ssh-agent -s)" > /dev/null
+        log "INFO" "Đã khởi động SSH agent"
+    fi
+    
+    # Add key to agent
+    local key_files=("$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_rsa" "$HOME/.ssh/id_ecdsa")
+    
+    for key_file in "${key_files[@]}"; do
+        if [ -f "$key_file" ]; then
+            if ssh-add "$key_file" 2>/dev/null; then
+                log "INFO" "Đã thêm key vào SSH agent: $(basename "$key_file")"
+                return 0
+            fi
+        fi
+    done
+    
+    log "WARN" "Không thể thêm key vào SSH agent"
+    return 1
+}
+
+# Display public key and guide user to add to GitHub
+guide_add_key_to_github() {
+    local pub_key_file
+    local pub_key_files=("$HOME/.ssh/id_ed25519.pub" "$HOME/.ssh/id_rsa.pub" "$HOME/.ssh/id_ecdsa.pub")
+    
+    # Find public key file
+    for file in "${pub_key_files[@]}"; do
+        if [ -f "$file" ]; then
+            pub_key_file="$file"
+            break
+        fi
+    done
+    
+    if [ -z "$pub_key_file" ]; then
+        log "ERROR" "Không tìm thấy public key file"
+        return 1
+    fi
+    
+    echo
+    echo "🎯 ================================== QUAN TRỌNG =================================="
+    echo "📋 Public key của bạn (COPY TOÀN BỘ dòng dưới đây):"
+    echo
+    echo -e "${GREEN}$(cat "$pub_key_file")${NC}"
+    echo
+    echo "🔧 Các bước thêm SSH key vào GitHub:"
+    echo "   1. Mở trình duyệt và truy cập: https://github.com/settings/keys"
+    echo "   2. Click nút '${GREEN}New SSH key${NC}'"
+    echo "   3. Đặt tên cho key (ví dụ: 'My Windows Laptop')"
+    echo "   4. Copy & paste TOÀN BỘ dòng key ở trên vào ô 'Key'"
+    echo "   5. Click '${GREEN}Add SSH key${NC}'"
+    echo "   6. Nhập password GitHub để xác nhận"
+    echo
+    echo "💡 Tip: Trên Windows, dùng Ctrl+Shift+C để copy trong Git Bash"
+    echo "==============================================================================="
+    echo
+    
+    # Auto copy to clipboard if possible
+    if command -v clip.exe >/dev/null 2>&1; then
+        cat "$pub_key_file" | clip.exe
+        log "INFO" "✅ Đã copy key vào clipboard tự động!"
+    elif command -v xclip >/dev/null 2>&1; then
+        cat "$pub_key_file" | xclip -selection clipboard
+        log "INFO" "✅ Đã copy key vào clipboard tự động!"
+    fi
+    
+    # Wait for user confirmation
+    echo -n "Nhấn Enter sau khi đã thêm SSH key vào GitHub..."
+    read -r
+    
+    return 0
+}
+
+# Check SSH connection to GitHub with detailed feedback
+check_ssh_github() {
+    log "INFO" "Kiểm tra kết nối SSH với GitHub..."
+    
+    local ssh_output
+    local max_attempts=3
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        # Test SSH connection with detailed output
+        ssh_output=$(ssh -o ConnectTimeout=10 -o BatchMode=yes -T git@github.com 2>&1)
+        
+        if echo "$ssh_output" | grep -q "successfully authenticated"; then
+            # Extract username from output
+            local username=$(echo "$ssh_output" | grep -o "Hi [^!]*" | cut -d' ' -f2)
+            log "INFO" "🎉 SSH connection thành công! Xin chào $username"
+            return 0
+        elif echo "$ssh_output" | grep -q "Permission denied"; then
+            log "WARN" "❌ SSH key chưa được add vào GitHub hoặc không đúng"
+            if [ $attempt -eq $max_attempts ]; then
+                log "ERROR" "Vui lòng kiểm tra lại SSH key trên GitHub"
+                return 1
+            fi
+        elif echo "$ssh_output" | grep -q "Connection timed out\|Network is unreachable"; then
+            log "WARN" "❌ Không thể kết nối đến GitHub (lỗi mạng)"
+            if [ $attempt -eq $max_attempts ]; then
+                return 1
+            fi
+        else
+            log "WARN" "❌ Lỗi không xác định: $ssh_output"
+            if [ $attempt -eq $max_attempts ]; then
+                return 1
+            fi
+        fi
+        
+        if [ $attempt -lt $max_attempts ]; then
+            log "INFO" "Thử lại lần $((attempt + 1))/$max_attempts sau 3 giây..."
+            sleep 3
+        fi
+        
+        attempt=$((attempt + 1))
+    done
+    
+    return 1
+}
+
 # ======================== GITHUB FUNCTIONS ========================
 
 # Check if GitHub CLI is available and authenticated
@@ -163,49 +337,86 @@ check_github_cli() {
     return 1
 }
 
-# Check SSH connection to GitHub
-check_ssh_github() {
-    log "INFO" "Kiểm tra kết nối SSH với GitHub..."
+# Complete SSH setup process
+setup_ssh_github() {
+    log "INFO" "🔐 Thiết lập SSH connection với GitHub..."
     
-    # For Windows Git Bash, may need different approach
-    if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
-        if ssh -o ConnectTimeout=10 -o BatchMode=yes -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
-            log "INFO" "SSH connection với GitHub thành công"
-            return 0
-        fi
-    else
-        if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
-            log "INFO" "SSH connection với GitHub thành công"
-            return 0
+    # Step 1: Check if SSH key exists
+    if ! check_ssh_key_exists; then
+        log "INFO" "Tạo SSH key mới..."
+        if ! generate_ssh_key; then
+            log "ERROR" "Không thể tạo SSH key"
+            return 1
         fi
     fi
     
-    log "WARN" "SSH connection với GitHub thất bại"
-    return 1
-}
-
-# Setup authentication method
-setup_auth() {
-    log "INFO" "Thiết lập phương thức xác thực..."
+    # Step 2: Setup SSH agent
+    setup_ssh_agent
     
-    # Try GitHub CLI first
-    if check_github_cli; then
-        return 0
-    fi
-    
-    # Try SSH
+    # Step 3: Test connection first
     if check_ssh_github; then
         return 0
     fi
     
-    # Fallback instructions
+    # Step 4: If connection fails, guide user to add key to GitHub
+    log "INFO" "SSH key chưa được thêm vào GitHub hoặc chưa đúng"
+    
+    if ! guide_add_key_to_github; then
+        return 1
+    fi
+    
+    # Step 5: Test connection again
+    log "INFO" "Kiểm tra lại kết nối SSH..."
+    if check_ssh_github; then
+        log "INFO" "🎉 SSH setup hoàn tất!"
+        return 0
+    else
+        log "ERROR" "SSH connection vẫn thất bại. Vui lòng kiểm tra lại:"
+        echo "  - SSH key đã được add vào GitHub chưa?"
+        echo "  - Internet connection có ổn định không?"
+        echo "  - Firewall có block SSH không?"
+        return 1
+    fi
+}
+
+# Setup authentication method
+setup_auth() {
+    log "INFO" "🔐 Thiết lập phương thức xác thực GitHub..."
+    
+    # Try GitHub CLI first (fastest if already set up)
+    if check_github_cli; then
+        return 0
+    fi
+    
+    # Try SSH setup (recommended for long-term use)
+    log "INFO" "Thiết lập SSH connection..."
+    if setup_ssh_github; then
+        return 0
+    fi
+    
+    # If all methods fail, provide instructions
     echo
-    log "WARN" "Không tìm thấy phương thức xác thực nào!"
-    echo "Vui lòng chọn một trong các cách sau:"
-    echo "1. Cài đặt GitHub CLI: https://cli.github.com/"
-    echo "2. Thiết lập SSH key: https://docs.github.com/en/authentication/connecting-to-github-with-ssh"
+    log "ERROR" "❌ Không thể thiết lập xác thực GitHub!"
     echo
-    read -p "Nhấn Enter để tiếp tục sau khi thiết lập xác thực..." -r
+    echo "🔧 Các phương án khác:"
+    echo "1. Cài đặt GitHub CLI:"
+    echo "   - Download: https://cli.github.com/"
+    echo "   - Hoặc: winget install GitHub.cli"
+    echo "   - Sau đó chạy: gh auth login"
+    echo
+    echo "2. Thiết lập SSH key thủ công:"
+    echo "   - https://docs.github.com/en/authentication/connecting-to-github-with-ssh"
+    echo
+    echo "3. Sử dụng HTTPS với Personal Access Token:"
+    echo "   - Tạo token: https://github.com/settings/tokens"
+    echo "   - Dùng username + token thay vì password"
+    echo
+    
+    read -p "Bạn có muốn tiếp tục mà không xác thực? (y/n): " -r
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        log "WARN" "⚠️ Tiếp tục mà không xác thực - có thể gặp lỗi khi push"
+        return 0
+    fi
     
     return 1
 }
@@ -362,29 +573,30 @@ test_repo_connection() {
 # Main workflow
 main_workflow() {
     local filename folder_name script_file repo_url
-    local total_steps=8
+    local total_steps=9  # Updated to include SSH setup
     local current_step=0
     
     echo
-    echo "🚀 GITHUB SCRIPT CREATOR - Phiên bản tối ưu"
-    echo "=================================================="
+    echo "🚀 GITHUB SCRIPT CREATOR - Phiên bản Pro với Auto SSH Setup"
+    echo "================================================================="
     
     # Step 1: Load config
     current_step=$((current_step + 1))
     show_progress $current_step $total_steps
     load_config
     
-    # Step 2: Setup authentication
-    current_step=$((current_step + 1))
-    show_progress $current_step $total_steps
-    if ! setup_auth; then
-        log "WARN" "Tiếp tục mà không xác thực (có thể gặp lỗi khi push)"
-    fi
-    
-    # Step 3: Setup Git config
+    # Step 2: Setup Git config
     current_step=$((current_step + 1))
     show_progress $current_step $total_steps
     setup_git_config
+    
+    # Step 3: Setup authentication (includes SSH auto-setup)
+    current_step=$((current_step + 1))
+    show_progress $current_step $total_steps
+    if ! setup_auth; then
+        log "ERROR" "Không thể thiết lập xác thực GitHub"
+        exit 1
+    fi
     
     # Step 4: Get filename
     current_step=$((current_step + 1))
@@ -427,11 +639,11 @@ main_workflow() {
     git add "$script_file"
     git commit -m "Thêm script $script_file
 
-- Tạo bởi GitHub Script Creator
+- Tạo bởi GitHub Script Creator v2.0
 - Ngày tạo: $(date '+%Y-%m-%d %H:%M:%S')
 - Tác giả: $(git config user.name)" >/dev/null 2>&1
     
-    # Step 8: Push to GitHub
+    # Step 8: Get repository URL and test connection
     current_step=$((current_step + 1))
     show_progress $current_step $total_steps
     
@@ -442,16 +654,21 @@ main_workflow() {
         exit 1
     fi
     
+    # Step 9: Push to GitHub
+    current_step=$((current_step + 1))
+    show_progress $current_step $total_steps
+    
     git remote add origin "$repo_url" 2>/dev/null || true
     git branch -M "$DEFAULT_BRANCH"
     
     log "INFO" "Đang đẩy code lên GitHub..."
     if git push -u origin "$DEFAULT_BRANCH" 2>&1 | tee -a "$LOG_FILE"; then
         echo
-        log "INFO" "🎉 Hoàn thành! Script đã được đẩy lên GitHub thành công"
+        log "INFO" "🎉 HOÀN THÀNH! Script đã được đẩy lên GitHub thành công"
         log "INFO" "📁 Thư mục: $(pwd)"
         log "INFO" "📄 File: $script_file"
         log "INFO" "🔗 Repository: $repo_url"
+        log "INFO" "📊 Log file: $LOG_FILE"
     else
         log "ERROR" "Có lỗi khi đẩy code lên GitHub"
         exit 1
@@ -463,23 +680,39 @@ main_workflow() {
 # Show help
 show_help() {
     cat << EOF
-GitHub Script Creator - Phiên bản tối ưu
+GitHub Script Creator - Phiên bản tối ưu với Auto SSH Setup
+
+TÍNH NĂNG CHÍNH:
+    ✅ Tự động tạo SSH key nếu chưa có
+    ✅ Hướng dẫn add SSH key vào GitHub step-by-step  
+    ✅ Auto-copy SSH key vào clipboard (Windows)
+    ✅ Kiểm tra kết nối GitHub với feedback chi tiết
+    ✅ Template script có sẵn
+    ✅ Progress tracking và error handling
 
 CÁCH DÙNG:
     $0 [OPTIONS]
 
-CÁC TÙRY CHỌN:
+CÁC TÙY CHỌN:
     -h, --help          Hiển thị hướng dẫn này
     -n, --name NAME     Tên file script (không cần .sh)
-    -r, --repo URL      URL repository GitHub
+    -r, --repo URL      URL repository GitHub  
     -e, --editor EDITOR Editor để chỉnh sửa (mặc định: nano)
     -v, --verbose       Hiển thị thông tin chi tiết
     --version           Hiển thị phiên bản
 
 VÍ DỤ:
-    $0                                  # Chế độ interactive
+    $0                                  # Chế độ interactive (khuyên dùng)
     $0 -n backup-script                 # Tạo script với tên cụ thể
-    $0 -n test -r https://github.com/user/repo.git
+    $0 -n test -r git@github.com:user/repo.git
+    
+QUY TRÌNH TỰ ĐỘNG:
+    1. 🔍 Kiểm tra SSH key có sẵn
+    2. 🔑 Tạo SSH key mới nếu chưa có  
+    3. 📋 Hướng dẫn add vào GitHub (auto-copy key)
+    4. ✅ Test kết nối GitHub
+    5. 📝 Tạo script với template
+    6. 🚀 Push lên repository
 
 EOF
 }
